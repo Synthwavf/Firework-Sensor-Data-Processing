@@ -2,15 +2,60 @@
 # -*- coding: utf-8 -*-
 
 """
-fireworks_baseline_plume_v4b.py
+test2_assim_v6.py
 
 Baseline-only inversion + centered diffusion (no drift) + wind-informed anisotropy.
 
-You asked:
-- Baseline is median of [22:15, 22:20) for each sensor.
-- Use all sensors + wind speed/direction to "invert" emissions Q(t) and run diffusion model.
-- Diffusion can expand as far as it needs (auto domain).
-- Anything below baseline -> transparent.
+Project-level requirements summary (data -> baseline -> physics -> inversion -> viz -> outputs):
+
+1) Goal
+- Use multi-sensor PM2.5 + wind to generate a time-varying plume heatmap for paper-grade visuals.
+- Animate the time series on a map.
+
+2) Inputs
+- Sensor CSV per sensor: Data_*.csv with Counter and PM2.5_* columns.
+- Wind CSV: wind_speed_2025.csv with DATE, wind_speed, wind_direction ("from"; 999/invalid handled).
+- Fixed sensor lat/lon and fixed source (fireworks location).
+
+3) Baseline
+- Use median of 22:15-22:20 per sensor (not 20:00).
+- Baseline is fixed; baseline floor is transparent.
+- Enhancement only: max(0, PM - baseline).
+
+4) Physics / diffusion
+- Center-locked plume (no advection shift).
+- Wind shapes anisotropy only; avoid drifting the center.
+- Auto domain sizing (AUTO_DOMAIN).
+
+5) Inversion
+- Use all sensors + wind + enhancement to invert Q(t).
+- Avoid empty-looking fields; ensure sensors drive results (not wind alone).
+- Provide diagnostics (sensor fit, emission profile).
+
+6) Decay / end behavior
+- Enhancement below baseline is transparent; plume fades out if no enhancement.
+- Optional extra fade after fireworks end.
+
+7) Visualization
+- Plotly time heatmap (primary).
+- Folium HeatMapWithTime (optional), with slider/blur compatibility handling.
+- Baseline floor is transparent; sensor overlay enabled.
+
+8) Outputs (OUT_DIR):
+- baseline_values.csv
+- sensor_weights.csv
+- emission_profile.csv + emission_profile.png
+- field_max_timeseries.png
+- sensor_fit_enhancement.png
+- centered_baseline_plume_plotly.html  (recommended)
+- centered_baseline_plume_folium.html  (optional)
+
+9) Acceptance checks
+- Heatmap renders and animates (not blank).
+- Diffusion is stepwise and center-locked to the source.
+- Baseline uses 22:15-22:20 median; baseline floor is transparent.
+- Wind shapes the plume but does not fully dominate it.
+- Sensor fit diagnostics show sensor contributions are used.
 
 This script models ONLY enhancement above baseline:
   enh_s(t) = max(0, PM_s(t) - baseline_s)
@@ -22,17 +67,8 @@ and simulates a center-locked puff field:
 Rendering is enhancement only (baseline is implicitly 0),
 and values below a display threshold are made transparent.
 
-Outputs (OUT_DIR):
-- baseline_values.csv
-- sensor_weights.csv
-- emission_profile.csv + emission_profile.png
-- field_max_timeseries.png
-- sensor_fit_enhancement.png
-- centered_baseline_plume_plotly.html  (recommended)
-- centered_baseline_plume_folium.html  (optional)
-
 Run:
-  python fireworks_baseline_plume_v4b.py
+  python test2_assim_v6.py
 
 View:
   python -m http.server 8000
