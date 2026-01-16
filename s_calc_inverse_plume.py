@@ -80,6 +80,11 @@ DT_MIN = 1
 WINDOW_MIN = 20
 STEP_MIN = 5
 
+# Debug logging
+DEBUG = True
+DEBUG_LOG_ON_FAIL_ONLY = True
+DEBUG_MAX_LOGS_PER_SENSOR = 8
+
 # Background definition
 BACKGROUND_METHOD = "baseline_window"   # "baseline_window" or "percentile"
 BACKGROUND_PERCENTILE = 10.0
@@ -226,7 +231,8 @@ def compute_background(series: pd.Series, baseline: float) -> float:
 def compute_crosswind_samples(r_xy: Tuple[float, float],
                               wind_speed: np.ndarray,
                               wind_dir_from: np.ndarray,
-                              conc: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+                              conc: np.ndarray,
+                              return_debug: bool = False):
     r_x, r_y = r_xy
     theta = np.array([met_from_to_theta(wd) if np.isfinite(wd) else np.nan for wd in wind_dir_from], dtype=float)
     ux = np.sin(theta)
@@ -235,11 +241,24 @@ def compute_crosswind_samples(r_xy: Tuple[float, float],
     y = -r_x * uy + r_y * ux
     angle = np.rad2deg(np.arctan2(y, x))
 
-    mask = np.isfinite(conc) & np.isfinite(wind_speed) & np.isfinite(angle)
-    mask &= (wind_speed >= MIN_WIND_SPEED)
-    mask &= (x >= MIN_DOWNWIND_M)
-    mask &= (np.abs(angle) <= MAX_ABS_ANGLE)
-    return angle[mask], y[mask], wind_speed[mask], conc[mask]
+    mask0 = np.isfinite(conc) & np.isfinite(wind_speed) & np.isfinite(angle)
+    mask1 = mask0 & (wind_speed >= MIN_WIND_SPEED)
+    mask2 = mask1 & (x >= MIN_DOWNWIND_M)
+    mask3 = mask2 & (np.abs(angle) <= MAX_ABS_ANGLE)
+
+    if return_debug:
+        debug = {
+            "n_total": int(conc.size),
+            "n_finite": int(mask0.sum()),
+            "n_wind": int(mask1.sum()),
+            "n_downwind": int(mask2.sum()),
+            "n_angle": int(mask3.sum()),
+            "angle_min": float(np.nanmin(angle)) if np.any(np.isfinite(angle)) else np.nan,
+            "angle_max": float(np.nanmax(angle)) if np.any(np.isfinite(angle)) else np.nan,
+        }
+        return angle[mask3], y[mask3], wind_speed[mask3], conc[mask3], debug
+
+    return angle[mask3], y[mask3], wind_speed[mask3], conc[mask3]
 
 def bin_profile(angle_deg: np.ndarray,
                 wind_speed: np.ndarray,
@@ -275,9 +294,10 @@ def bin_profile(angle_deg: np.ndarray,
     grp["angle_center_deg"] = bin_start + (grp["bin"].astype(float) + 0.5) * BIN_DEG
     return grp[["angle_center_deg", "mean_conc", "mean_wind", "n"]].copy()
 
-def fit_profile(profile: pd.DataFrame, range_m: float) -> Tuple[float, float, float, float]:
+def fit_profile(profile: pd.DataFrame, range_m: float) -> Tuple[float, float, float, float, str]:
     if profile.empty or range_m <= 0:
-        return np.nan, np.nan, np.nan, np.nan
+        reason = "empty_profile" if profile.empty else "invalid_range"
+        return np.nan, np.nan, np.nan, np.nan, reason
 
     ang = profile["angle_center_deg"].to_numpy(dtype=float)
     y = range_m * np.sin(np.deg2rad(ang))
@@ -286,7 +306,7 @@ def fit_profile(profile: pd.DataFrame, range_m: float) -> Tuple[float, float, fl
 
     mask = np.isfinite(y) & np.isfinite(c) & (c > 0)
     if mask.sum() < MIN_BINS_FOR_FIT:
-        return np.nan, np.nan, np.nan, np.nan
+        return np.nan, np.nan, np.nan, np.nan, "insufficient_bins"
 
     y2 = y[mask] ** 2
     logc = np.log(c[mask])
@@ -294,7 +314,7 @@ def fit_profile(profile: pd.DataFrame, range_m: float) -> Tuple[float, float, fl
     coef = np.polyfit(y2, logc, deg=1, w=weights)
     slope, intercept = float(coef[0]), float(coef[1])
     if slope >= 0:
-        return np.nan, np.nan, np.nan, np.nan
+        return np.nan, np.nan, np.nan, np.nan, "non_negative_slope"
 
     sigma_y = math.sqrt(-1.0 / (2.0 * slope))
     sigma_y = float(np.clip(sigma_y, MIN_SIGMA_Y, MAX_SIGMA_Y))
@@ -304,7 +324,7 @@ def fit_profile(profile: pd.DataFrame, range_m: float) -> Tuple[float, float, fl
     ss_res = float(np.sum((logc - logc_hat) ** 2))
     ss_tot = float(np.sum((logc - np.mean(logc)) ** 2))
     r2 = 1.0 - (ss_res / ss_tot if ss_tot > 0 else np.nan)
-    return sigma_y, c0, r2, float(mask.sum())
+    return sigma_y, c0, r2, float(mask.sum()), "ok"
 
 
 # =========================
@@ -361,8 +381,12 @@ def main():
 
     results = []
     profile_rows = []
+    reason_counts: Dict[str, Dict[str, int]] = {}
+    sensor_logs: Dict[str, int] = {}
 
     for s in sensors:
+        reason_counts[s] = {}
+        sensor_logs[s] = 0
         r_xy = sensor_xy[s]
         range_m = sensor_r[s]
         baseline_s = baselines[s]
@@ -378,11 +402,12 @@ def main():
 
             bg = compute_background(pm, baseline_s)
             enh = (pm - bg).clip(lower=0.0).to_numpy(dtype=float)
-            angle, y_m, ws_v, enh_v = compute_crosswind_samples(
+            angle, y_m, ws_v, enh_v, dbg = compute_crosswind_samples(
                 r_xy=r_xy,
                 wind_speed=ws.to_numpy(dtype=float),
                 wind_dir_from=wd.to_numpy(dtype=float),
-                conc=enh
+                conc=enh,
+                return_debug=True
             )
 
             profile = bin_profile(angle, ws_v, enh_v)
@@ -399,7 +424,7 @@ def main():
                         "n_samples": int(row["n"])
                     })
 
-            sigma_y, c0, r2, n_bins_used = fit_profile(profile, range_m=range_m)
+            sigma_y, c0, r2, n_bins_used, reason = fit_profile(profile, range_m=range_m)
             if np.isfinite(sigma_y) and np.isfinite(c0):
                 sigma_z = float(SIGMA_Z_RATIO * sigma_y)
                 u_mean = float(np.nanmean(ws_v)) if ws_v.size > 0 else np.nan
@@ -408,6 +433,22 @@ def main():
                 sigma_z = np.nan
                 u_mean = float(np.nanmean(ws_v)) if ws_v.size > 0 else np.nan
                 s_eff = np.nan
+
+            reason_counts[s][reason] = reason_counts[s].get(reason, 0) + 1
+
+            if DEBUG and (not DEBUG_LOG_ON_FAIL_ONLY or reason != "ok"):
+                if sensor_logs[s] < DEBUG_MAX_LOGS_PER_SENSOR:
+                    enh_pos = float(np.mean(enh > 0)) if enh.size > 0 else np.nan
+                    print(
+                        f"[DEBUG] {s} {t_start.strftime('%H:%M')}–{t_end.strftime('%H:%M')} "
+                        f"bg={bg:.2f} enh_mean={np.nanmean(enh):.2f} enh_pos={enh_pos:.2f} "
+                        f"n={dbg['n_total']}/{dbg['n_finite']}/{dbg['n_wind']}/{dbg['n_downwind']}/{dbg['n_angle']} "
+                        f"bins={profile.shape[0]} fit={reason} "
+                        f"sigma_y={sigma_y if np.isfinite(sigma_y) else np.nan:.1f} "
+                        f"c0={c0 if np.isfinite(c0) else np.nan:.3f} "
+                        f"u_mean={u_mean if np.isfinite(u_mean) else np.nan:.2f} r2={r2 if np.isfinite(r2) else np.nan:.2f}"
+                    )
+                    sensor_logs[s] += 1
 
             results.append({
                 "sensor": s,
@@ -422,7 +463,8 @@ def main():
                 "s_eff_ug_s": s_eff,
                 "fit_r2": r2,
                 "range_m": range_m,
-                "background": bg
+                "background": bg,
+                "fit_reason": reason
             })
 
     df = pd.DataFrame(results)
@@ -456,6 +498,13 @@ def main():
         print("Saved:", out_png)
     else:
         print("No valid S-calc windows found; check filters and wind data.")
+
+    if DEBUG:
+        print("\n[DEBUG] Fit outcome counts per sensor:")
+        for s in sensors:
+            counts = reason_counts.get(s, {})
+            ordered = ", ".join(f"{k}:{v}" for k, v in sorted(counts.items()))
+            print(f"  {s}: {ordered if ordered else 'no windows'}")
 
 
 if __name__ == "__main__":
