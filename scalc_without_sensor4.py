@@ -1617,6 +1617,10 @@ def main():
         else:
             global_baseline = float(np.nanmin(tmp.median(axis=0, skipna=True).to_numpy(dtype=float)))
 
+    print("################################################################################")
+    print(f"Initial global-min baseline across sensors with valid baseline window: {global_baseline:.3f} ug/m3")
+    print("################################################################################")
+
     # Fill sensors that lacked baseline-window samples with global baseline
     baselines_sensor = baselines_sensor.fillna(global_baseline)
 
@@ -1868,6 +1872,9 @@ def main():
 
     # Overall RMSE
     rmse_all = float(np.sqrt(np.mean((obs_flat - pred_flat)**2)))
+
+    print(f"  Full-data R²:              {full_r2:.4f}" if np.isfinite(full_r2)
+        else "  Full-data R²:              NaN (no variance)")
 
     print(f"\n  ── Dispersion Model Evaluation (Chang & Hanna 2004 framework) ──")
     print(f"  FAC2 (frac within 2×):    {fac2_all:.4f}   (>0.50 = good)")
